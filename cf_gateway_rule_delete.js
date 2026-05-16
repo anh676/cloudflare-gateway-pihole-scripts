@@ -1,50 +1,30 @@
-require("dotenv").config();
-const axios = require('axios');
+import { deleteZeroTrustRule, getZeroTrustRules } from "./lib/api.js";
+import { DELETION_ENABLED } from "./lib/constants.js";
+import { notifyWebhook } from "./lib/utils.js";
 
-const API_TOKEN = process.env.CLOUDFLARE_API_KEY;
-const ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID;
-const ACCOUNT_EMAIL = process.env.CLOUDFLARE_ACCOUNT_EMAIL;
-
-// Function to read Cloudflare Zero Trust rules
-async function getZeroTrustRules() {
-  const response = await axios.get(
-    `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/gateway/rules`,
-    {
-      headers: {
-        'Authorization': `Bearer ${API_TOKEN}`,
-        'Content-Type': 'application/json',
-        'X-Auth-Email': ACCOUNT_EMAIL,
-        'X-Auth-Key': API_TOKEN,
-      },
-    }
+if (!DELETION_ENABLED) {
+  console.warn(
+    "The rule deletion step is no longer needed to update filter lists, safely skipping. To proceed with deletion to e.g. stop using CGPS, set the environment variable CGPS_DELETION_ENABLED=true and re-run the script. Exiting."
   );
-
-  return response.data.result;
+  process.exit(0);
 }
 
-;(async() => {
-    const rules = await getZeroTrustRules();
-    const [filtered_rule] = rules.filter(rule => rule.name === "CGPS Filter Lists");
+const { result: rules } = await getZeroTrustRules();
+const cgpsRules = rules.filter(({ name }) => name.startsWith("CGPS Filter Lists"));
 
-    if (!filtered_rule) return console.warn("No rule with matching name found - this is not an issue if you haven't run the create script yet. Exiting.");
+(async () => {
+  if (!cgpsRules.length) {
+    console.warn(
+      "No rule(s) with matching name found - this is not an issue if you haven't run the create script yet. Exiting."
+    );
+    return;
+  }
 
-    console.log(`Deleting rule`, process.env.CI ? "(redacted, running in CI)" : `${filtered_rule.name} with ID ${filtered_rule.id}`);
-
-    const resp = await axios.request({
-        method: 'DELETE',
-        url: `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/gateway/rules/${filtered_rule.id}`,
-        headers: {
-            'Authorization': `Bearer ${API_TOKEN}`,
-            'Content-Type': 'application/json',
-            'X-Auth-Email': ACCOUNT_EMAIL,
-            'X-Auth-Key': API_TOKEN,
-        },
-    });
-
-    console.log('Success: ', resp.data.success);
-    await sleep(350); // Cloudflare API rate limit is 1200 requests per 5 minutes, so we sleep for 350ms to be safe
+  for (const cgpsRule of cgpsRules) {
+    console.log(`Deleting rule ${cgpsRule.name}...`);
+    await deleteZeroTrustRule(cgpsRule.id);
+  }
 })();
 
-async function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
+// Send a notification to the webhook
+await notifyWebhook("CF Gateway Rule Delete script finished running");
